@@ -127,7 +127,7 @@ camera3::Size getMaxJpegResolution(const CameraMetadata &metadata,
 
 size_t getUHRMaxJpegBufferSize(camera3::Size uhrMaxJpegSize,
         camera3::Size defaultMaxJpegSize, size_t defaultMaxJpegBufferSize) {
-    return (uhrMaxJpegSize.width * uhrMaxJpegSize.height) /
+    return ((float)(uhrMaxJpegSize.width * uhrMaxJpegSize.height)) /
             (defaultMaxJpegSize.width * defaultMaxJpegSize.height) * defaultMaxJpegBufferSize;
 }
 
@@ -150,7 +150,7 @@ int64_t euclidDistSquare(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
 bool roundBufferDimensionNearest(int32_t width, int32_t height,
         int32_t format, android_dataspace dataSpace,
         const CameraMetadata& info, bool maxResolution, /*out*/int32_t* outWidth,
-        /*out*/int32_t* outHeight) {
+        /*out*/int32_t* outHeight, bool isPriviledgedClient) {
     const int32_t depthSizesTag =
             getAppropriateModeTag(ANDROID_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS,
                     maxResolution);
@@ -190,6 +190,34 @@ bool roundBufferDimensionNearest(int32_t width, int32_t height,
             }
         }
     }
+
+    if (isPriviledgedClient == true && bestWidth == -1 &&
+        (format == HAL_PIXEL_FORMAT_RAW10 || format == HAL_PIXEL_FORMAT_RAW12 ||
+         format == HAL_PIXEL_FORMAT_RAW16 || format == HAL_PIXEL_FORMAT_RAW_OPAQUE)) {
+        bool isLogicalCamera = false;
+        auto entry = info.find(ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
+        for (size_t i = 0; i < entry.count; ++i) {
+            uint8_t capability = entry.data.u8[i];
+            if (capability == ANDROID_REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) {
+                isLogicalCamera = true;
+                break;
+            }
+        }
+
+        if (isLogicalCamera == true) {
+            bestWidth = width;
+            bestHeight = height;
+        }
+    }
+
+    // Avoid roundBufferDimensionsNearest for privileged client YUV/blob streams to meet the
+    // AIDE2 requirement. AIDE2 is vendor enhanced feature which requires special resolutions
+    // and those are not populated in static capabilities.
+    if (isPriviledgedClient == true &&
+        (format == HAL_PIXEL_FORMAT_YCbCr_420_888 || format == HAL_PIXEL_FORMAT_BLOB)) {
+        ALOGI("Bypass roundBufferDimensionNearest for privilegedClient YUV/blob streams "
+              "width %d height %d format %d",
+              width, height, format);
 
     if (bestWidth == -1) {
         // Return false if no configurations for this format were listed
@@ -427,7 +455,7 @@ binder::Status createSurfaceFromGbp(
     if (flexibleConsumer && isPublicFormat(format) &&
             !SessionConfigurationUtils::roundBufferDimensionNearest(width, height,
             format, dataSpace, physicalCameraMetadata, foundInMaxRes, /*out*/&width,
-            /*out*/&height)) {
+            /*out*/&height, isPriviledgedClient)) {
         String8 msg = String8::format("Camera %s: No supported stream configurations with "
                 "format %#x defined, failed to create output stream",
                 logicalCameraId.string(), format);
